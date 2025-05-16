@@ -7,7 +7,6 @@ import urllib.request
 import shutil
 import datetime
 from modules import script_callbacks, shared, ui_components
-from modules.shared import OptionInfo
 from fastapi import FastAPI, Request, Response
 
 # Define the extension's configuration path
@@ -22,9 +21,11 @@ DEFAULT_CONFIG = {
     "timeout": 60,
     "default_model_type": "Checkpoint",
     "save_preview_grid": True,
-    "default_sort": "Highest Rated",
-    "default_period": "All Time",
-    "default_base_model": "SD 1.5"
+    "sort_by": "Most Downloaded",
+    "time_period": "All Time",
+    "base_model": "All",
+    "search_type": "Models",
+    "token_based_auth": False
 }
 
 # Model types and their corresponding directories
@@ -36,32 +37,16 @@ MODEL_TYPES = {
     "AestheticGradient": os.path.join(shared.models_path, "aesthetic_embeddings"),
     "VAE": os.path.join(shared.models_path, "VAE"),
     "Controlnet": os.path.join(shared.models_path, "ControlNet"),
-    "Poses": os.path.join(shared.models_path, "Poses"),
-    "Wildcards": os.path.join(shared.models_path, "Wildcards"),
-    "LyCORIS": os.path.join(shared.models_path, "LyCORIS"),
-    "Upscaler": os.path.join(shared.models_path, "ESRGAN"),
-    "Other": os.path.join(shared.models_path, "Other")
+    "Pose": os.path.join(shared.models_path, "Poses")
 }
-
-# Base models for filtering
-BASE_MODELS = [
-    "SD 1.5", 
-    "SD 2.0", 
-    "SD 2.1", 
-    "SDXL 1.0", 
-    "SDXL Turbo", 
-    "Stable Cascade", 
-    "Pony",
-    "Forge",
-    "Any"
-]
 
 # Sort options
 SORT_OPTIONS = [
-    "Highest Rated",
     "Most Downloaded",
+    "Highest Rated",
     "Newest",
-    "Most Liked"
+    "Most Liked",
+    "Most Discussed"
 ]
 
 # Time period options
@@ -73,49 +58,96 @@ TIME_PERIODS = [
     "Day"
 ]
 
-# Search types
+# Base model options
+BASE_MODELS = [
+    "All",
+    "SD 1.5",
+    "SD 2.0",
+    "SD 2.1",
+    "SD XL",
+    "SDXL Turbo",
+    "SVD",
+    "Other"
+]
+
+# Search type options
 SEARCH_TYPES = [
     "Models",
     "Images",
     "Articles"
 ]
 
-# Register extension settings
-def on_ui_settings():
-    section = ('civitai_downloader', "Civitai Downloader")
-    
-    shared.opts.add_option("civitai_api_token", OptionInfo("", "Civitai API Token", section=section))
-    shared.opts.add_option("civitai_default_model_type", OptionInfo("Checkpoint", "Default Model Type", gr.Dropdown, lambda: {"choices": list(MODEL_TYPES.keys())}, section=section))
-    shared.opts.add_option("civitai_save_preview_grid", OptionInfo(True, "Save preview grid with model", section=section))
-    shared.opts.add_option("civitai_preview_count", OptionInfo(9, "Number of preview images to download", gr.Slider, {"minimum": 1, "maximum": 20, "step": 1}, section=section))
-    shared.opts.add_option("civitai_request_timeout", OptionInfo(60, "API request timeout (seconds)", gr.Slider, {"minimum": 10, "maximum": 300, "step": 5}, section=section))
-    shared.opts.add_option("civitai_default_sort", OptionInfo("Highest Rated", "Default sort order", gr.Dropdown, lambda: {"choices": SORT_OPTIONS}, section=section))
-    shared.opts.add_option("civitai_default_period", OptionInfo("All Time", "Default time period", gr.Dropdown, lambda: {"choices": TIME_PERIODS}, section=section))
-    shared.opts.add_option("civitai_default_base_model", OptionInfo("SD 1.5", "Default base model filter", gr.Dropdown, lambda: {"choices": BASE_MODELS}, section=section))
-    shared.opts.add_option("civitai_nsfw_default", OptionInfo(False, "Include NSFW content by default", section=section))
-    shared.opts.add_option("civitai_download_images", OptionInfo(True, "Download preview images with model", section=section))
-    shared.opts.add_option("civitai_search_type", OptionInfo("Models", "Default search type", gr.Dropdown, lambda: {"choices": SEARCH_TYPES}, section=section))
+# Map API parameter names
+SORT_BY_MAP = {
+    "Most Downloaded": "downloadCount",
+    "Highest Rated": "rating",
+    "Newest": "createdAt",
+    "Most Liked": "likes",
+    "Most Discussed": "commentCount"
+}
 
-# Helper function to get settings
-def get_setting(key, default=None):
-    try:
-        return getattr(shared.opts, f"civitai_{key}")
-    except:
-        config = get_config()
-        return config.get(key, default)
+TIME_PERIOD_MAP = {
+    "All Time": None,
+    "Year": "year",
+    "Month": "month",
+    "Week": "week",
+    "Day": "day"
+}
 
-# API endpoints and request functions
+BASE_MODEL_MAP = {
+    "All": None,
+    "SD 1.5": "SD 1.5",
+    "SD 2.0": "SD 2.0",
+    "SD 2.1": "SD 2.1",
+    "SD XL": "SDXL",
+    "SDXL Turbo": "SDXL Turbo",
+    "SVD": "SVD",
+    "Other": "Other"
+}
+
+# Load configuration
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, 'r') as f:
+            config = json.load(f)
+            # Ensure all default values are present
+            for key, value in DEFAULT_CONFIG.items():
+                if key not in config:
+                    config[key] = value
+            return config
+    else:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4)
+        return DEFAULT_CONFIG.copy()
+
+# Save configuration
+def save_config(config):
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(config, f, indent=4)
+
+# Get configuration
+def get_config():
+    return load_config()
+
+# Get headers
 def get_headers():
-    api_token = get_setting("api_token", "")
+    config = get_config()
     headers = {
-        "User-Agent": "CivitaiDownloaderExtension/1.0",
+        "User-Agent": "CivitaiDownloaderExtension/1.1",
         "Accept": "application/json"
     }
-    if api_token:
-        headers["Authorization"] = f"Token {api_token}"
+    
+    # Use token-based authentication if enabled
+    if config["token_based_auth"] and config["api_token"]:
+        headers["Authorization"] = f"Bearer {config['api_token']}"
+    # Otherwise use the legacy method
+    elif config["api_token"]:
+        headers["Authorization"] = f"Token {config['api_token']}"
+        
     return headers
 
-def search_models(query, page=1, limit=20, nsfw=False, types=None, sort=None, period=None, base_model=None, search_type="Models"):
+def search_models(query, page=1, limit=20, nsfw=False, types=None, sort_by=None, period=None, baseModel=None, search_type="Models"):
     params = {
         "query": query,
         "page": page,
@@ -126,37 +158,16 @@ def search_models(query, page=1, limit=20, nsfw=False, types=None, sort=None, pe
     if types:
         params["types"] = ",".join(types)
     
-    if sort:
-        sort_mapping = {
-            "Highest Rated": "Highest Rated", 
-            "Most Downloaded": "Most Downloaded",
-            "Newest": "Newest",
-            "Most Liked": "Most Liked"
-        }
-        params["sort"] = sort_mapping.get(sort, sort)
+    if sort_by:
+        params["sort"] = sort_by
     
-    if period and period != "All Time":
-        period_mapping = {
-            "Day": "day",
-            "Week": "week",
-            "Month": "month",
-            "Year": "year"
-        }
-        params["period"] = period_mapping.get(period, period.lower())
+    if period:
+        params["period"] = period
+        
+    if baseModel:
+        params["baseModel"] = baseModel
     
-    if base_model and base_model != "Any":
-        base_model_mapping = {
-            "SD 1.5": "SD 1.5",
-            "SD 2.0": "SD 2.0",
-            "SD 2.1": "SD 2.1", 
-            "SDXL 1.0": "SDXL 1.0",
-            "SDXL Turbo": "SDXL Turbo",
-            "Stable Cascade": "Stable Cascade",
-            "Pony": "Pony",
-            "Forge": "Forge"
-        }
-        params["baseModel"] = base_model_mapping.get(base_model, base_model)
-    
+    # Choose the appropriate API endpoint based on search type
     endpoint = "models"
     if search_type == "Images":
         endpoint = "images"
@@ -167,7 +178,7 @@ def search_models(query, page=1, limit=20, nsfw=False, types=None, sort=None, pe
         f"https://civitai.com/api/v1/{endpoint}", 
         params=params, 
         headers=get_headers(), 
-        timeout=get_setting("timeout", 60)
+        timeout=get_config()["timeout"]
     )
     return response.json()
 
@@ -175,7 +186,7 @@ def get_model_details(model_id):
     response = requests.get(
         f"https://civitai.com/api/v1/models/{model_id}", 
         headers=get_headers(), 
-        timeout=get_setting("timeout", 60)
+        timeout=get_config()["timeout"]
     )
     return response.json()
 
@@ -183,7 +194,7 @@ def get_model_versions(model_id):
     response = requests.get(
         f"https://civitai.com/api/v1/models/{model_id}/versions", 
         headers=get_headers(), 
-        timeout=get_setting("timeout", 60)
+        timeout=get_config()["timeout"]
     )
     return response.json()
 
@@ -191,11 +202,14 @@ def download_file(url, destination):
     # Make sure the directory exists
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     
-    # Add authorization header if token is provided
+    config = get_config()
+    
+    # Set up headers for download
     headers = {}
-    api_token = get_setting("api_token", "")
-    if api_token:
-        headers["Authorization"] = f"Token {api_token}"
+    if config["token_based_auth"] and config["api_token"]:
+        headers["Authorization"] = f"Bearer {config['api_token']}"
+    elif config["api_token"]:
+        headers["Authorization"] = f"Token {config['api_token']}"
     
     # Open a stream to the URL
     req = urllib.request.Request(url, headers=headers)
@@ -279,14 +293,39 @@ def on_ui_tabs():
                         search_term = gr.Textbox(label="Search", placeholder="Search models...")
                         search_button = gr.Button("Search", variant="primary")
                     
-                    with gr.Row():
-                        model_type_dropdown = gr.Dropdown(
-                            label="Filter by Type",
-                            choices=list(MODEL_TYPES.keys()),
-                            value=config["default_model_type"],
-                            multiselect=True
-                        )
-                        include_nsfw = gr.Checkbox(label="Include NSFW", value=False)
+                    with gr.Accordion("Search Options", open=True):
+                        with gr.Row():
+                            search_type_dropdown = gr.Dropdown(
+                                label="Search Type",
+                                choices=SEARCH_TYPES,
+                                value=config["search_type"]
+                            )
+                            sort_by_dropdown = gr.Dropdown(
+                                label="Sort By",
+                                choices=SORT_OPTIONS,
+                                value=config["sort_by"]
+                            )
+                        
+                        with gr.Row():
+                            time_period_dropdown = gr.Dropdown(
+                                label="Time Period",
+                                choices=TIME_PERIODS,
+                                value=config["time_period"]
+                            )
+                            base_model_dropdown = gr.Dropdown(
+                                label="Base Model",
+                                choices=BASE_MODELS,
+                                value=config["base_model"]
+                            )
+                            
+                        with gr.Row():
+                            model_type_dropdown = gr.Dropdown(
+                                label="Filter by Type",
+                                choices=list(MODEL_TYPES.keys()),
+                                value=config["default_model_type"],
+                                multiselect=True
+                            )
+                            include_nsfw = gr.Checkbox(label="Include NSFW", value=False)
                     
                     search_results = gr.Dataframe(
                         headers=["ID", "Name", "Type", "Downloads", "Rating"],
@@ -321,20 +360,39 @@ def on_ui_tabs():
                         download_status = gr.Textbox(label="Status", interactive=False)
 
         with gr.Tab("Settings"):
-            with gr.Box():
-                gr.HTML("<h3>Configuration</h3>")
-                api_token = gr.Textbox(
-                    label="Civitai API Token (optional)",
-                    value=config["api_token"],
-                    placeholder="Enter your API token for accessing restricted content"
-                )
-                
+            with gr.Accordion("API Configuration", open=True):
+                with gr.Row():
+                    api_token = gr.Textbox(
+                        label="Civitai API Token (optional)",
+                        value=config["api_token"],
+                        placeholder="Enter your API token for accessing restricted content",
+                        type="password"
+                    )
+                    token_based_auth = gr.Checkbox(
+                        label="Use New Bearer Token Authentication",
+                        value=config.get("token_based_auth", False),
+                        info="Enable this for newer Civitai API (Bearer token)"
+                    )
+
+            with gr.Accordion("Download Settings", open=True):
                 download_path = gr.Textbox(
                     label="Default Download Path",
                     value=config["download_path"],
                     placeholder="Enter default download path"
                 )
                 
+                default_model_type = gr.Dropdown(
+                    label="Default Model Type",
+                    choices=list(MODEL_TYPES.keys()),
+                    value=config["default_model_type"]
+                )
+                
+                save_preview_grid = gr.Checkbox(
+                    label="Save Preview Grid with Model",
+                    value=config["save_preview_grid"]
+                )
+            
+            with gr.Accordion("Display Settings", open=True):
                 preview_count = gr.Slider(
                     label="Preview Image Count",
                     minimum=1,
@@ -350,20 +408,34 @@ def on_ui_tabs():
                     value=config["timeout"],
                     step=5
                 )
-                
-                default_model_type = gr.Dropdown(
-                    label="Default Model Type",
-                    choices=list(MODEL_TYPES.keys()),
-                    value=config["default_model_type"]
+            
+            with gr.Accordion("Default Search Options", open=True):
+                default_search_type = gr.Dropdown(
+                    label="Default Search Type",
+                    choices=SEARCH_TYPES,
+                    value=config["search_type"]
                 )
                 
-                save_preview_grid = gr.Checkbox(
-                    label="Save Preview Grid with Model",
-                    value=config["save_preview_grid"]
+                default_sort_by = gr.Dropdown(
+                    label="Default Sort Order",
+                    choices=SORT_OPTIONS,
+                    value=config["sort_by"]
                 )
                 
-                save_settings_btn = gr.Button("Save Settings", variant="primary")
-                settings_status = gr.Textbox(label="Status", interactive=False)
+                default_time_period = gr.Dropdown(
+                    label="Default Time Period",
+                    choices=TIME_PERIODS,
+                    value=config["time_period"]
+                )
+                
+                default_base_model = gr.Dropdown(
+                    label="Default Base Model",
+                    choices=BASE_MODELS,
+                    value=config["base_model"]
+                )
+                
+            save_settings_btn = gr.Button("Save Settings", variant="primary")
+            settings_status = gr.Textbox(label="Status", interactive=False)
         
         # State variables
         current_page = gr.State(1)
