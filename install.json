@@ -1,0 +1,11 @@
+{
+    "name": "Civitai Downloader",
+    "description": "Download models from Civitai with previews, version selection, and API token support.",
+    "version": "1.0.0",
+    "author": "kanz",
+    "tags": ["civitai", "download", "models", "extension"],
+    "dependencies": [],
+    "install_command": null,
+    "uninstall_command": null,
+    "launch_compatibility": "compatible"
+}
